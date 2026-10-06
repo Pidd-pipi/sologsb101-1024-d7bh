@@ -2,7 +2,17 @@
 
 面向手工奶酪作坊与小型乳品工坊的熟成管理工具：把每个生产批次的**奶源 → 凝乳 → 上架窖位 → 转架/翻面/擦洗 → 库房温湿度 → 出库品评**逐环留档。
 
-核心动作：**建奶源与生产批次 → 分配熟成库货架与窖位 → 排转架/翻面/擦洗计划并逐次签署 → 录温湿度曲线并处置越界 → 到期出库品评打分并回写批次结论**。
+核心动作：**建奶源与生产批次 → 分配熟成库货架与窖位 → 排转架/翻面/擦洗计划并逐次签署 → 录温湿度曲线并处置越界 → 到期出库品评（先过判定链闸门）打分并连同依据回写批次结论**。
+
+### 出库品评判定链
+
+品评不再是「打完分均分即结论、批次照出库」，而是一条带前置闸门与依据留痕的判定链（`frontend/src/utils/judgement.ts`）：
+
+1. **品评前闸门（缺项挡下）**：提交品评前核查该批次的环境异常与转架进度——越界温湿度记录未补录处置措施、或仍有「待执行」的转架作业时，闸门不放行，弹窗逐条列出缺项，品评记录不会落库。
+2. **结论连同依据成立**：闸门通过后按同批次全部品评均分换算 优 / 合格 / 待改进，并把依据快照（品评条数、均分、环境异常数 / 未处置数、待签转架数、依据签名 FNV-1a）一并写入批次与每条品评。
+3. **依据改动即失效**：熟成期补录的越界温湿度、转架签署 / 跳过、品评打分增删改都会改变依据签名；订阅到环境 / 转架变动后，未复核的批次结论立即失效——清空批次回写值、置「失效待复核」标记并记录失效原因，**必须人工复核重算**（依据补齐不会自动复活）。
+4. **并发提交按最新依据重算**：两个窗口同时提交同批次品评时，提交经 Web Locks（`gbcheeseage:tasting-judgement`，不支持时退化为进程内 Promise 链）串行化，后落的一次在锁内重新读库、按最新依据重算均分与结论，不沿用旧结论。
+5. **导出带依据与失效原因**：全量快照的 `batches` 含判定字段、`tastings` 含依据快照；单批次档案额外带 `judgmentSummary`（闸门缺项明细、落库依据、当前重算结果、状态与失效原因）。
 
 纯前端单页应用（Vue 3 + TypeScript + Element Plus + Vite + Pinia + Vue Router），**无后端、无数据库服务、无 API 服务**，全部数据保存在浏览器本地（IndexedDB / Dexie + 少量 localStorage 元数据），刷新或重启浏览器后仍然存在。
 
@@ -44,7 +54,8 @@ docker compose up -d --build      # 代码改动后重新构建
 | 构建工具 | Vite 6 | 开发服务器端口 22824 |
 | 状态管理 | Pinia（setup store） | `milkStore` / `shelfStore` / `turningStore` / `tastingStore` |
 | 路由 | Vue Router 4（history 模式） | nginx 侧配合 `try_files` 做 SPA fallback |
-| 本地存储 | Dexie 4（IndexedDB 封装）+ localStorage | 库名 `gbcheeseage`，结构版本 `DB_VERSION = 2`，含真实 `.upgrade()` 迁移 |
+| 本地存储 | Dexie 4（IndexedDB 封装）+ localStorage | 库名 `gbcheeseage`，结构版本 `DB_VERSION = 3`，含真实 `.upgrade()` 迁移 |
+| 并发控制 | Web Locks API（`navigator.locks`） | 品评提交跨标签页串行化，后落一次按最新依据重算；不支持时退化进程内串行 |
 | 图表 | 手写 SVG 折线（无额外依赖） | 温湿度双曲线 + 越界点标记 |
 | 拖拽排序 | HTML5 原生 `draggable` 事件 | 未引入 `vuedraggable` / `dnd-kit` 等任何新依赖 |
 | 容器化 | Docker 多阶段构建：`node:20-alpine` → `nginx:alpine` | 构建阶段执行类型检查与打包，运行阶段仅托管静态产物 |
@@ -88,7 +99,7 @@ sologsb101-1024/
         ├── hooks/                # useAgingDays.ts useIdbTable.ts
         ├── pages/                # MilkList.vue ShelfBoard.vue TurningPlan.vue EnvironmentView.vue TastingBoard.vue
         ├── router/index.ts       # 路由表 + 懒加载 + document.title
-        ├── utils/                # temperature.ts db.ts export.ts
+        ├── utils/                # temperature.ts judgement.ts db.ts export.ts
         ├── styles/main.css
         ├── App.vue main.ts env.d.ts
 ```
@@ -99,7 +110,7 @@ sologsb101-1024/
 | `/shelves` | 熟成库货架与窖位 | 库房 / 货架号 / 层号 / 温区 / 可放块数维护，占用率卡片与进度条；上架时按余量硬校验并实时更新 `occupied`；下架释放余量 | Shelf、Batch |
 | `/turnings` | 转架 / 翻面 / 擦洗作业 | 按批次生成等间隔计划（起始日 + 间隔天数 × 次数）；逐条签署「待执行 → 已完成 / 已跳过」；HTML5 原生拖拽调整同批次内顺序并写回 `seq` | Turning、Batch、Shelf |
 | `/environment` | 温湿度记录与曲线 | 按温区阈值自动判定越界并标异常，提示开窗 / 加湿措施；手写 SVG 温湿度双曲线 + 越界点；一键重算异常标记 | Environment、Batch、Shelf |
-| `/tastings` | 出库品评与档案导出 | 外观 / 风味 / 质地三维打分，同批次均分回写批次结论；JSON 全量导出导入（覆盖 / 追加两种模式）、单批次档案导出、重置并重新播种 | Tasting 及全部模型 |
+| `/tastings` | 出库品评判定链与档案导出 | 提交前闸门核查（未处置越界记录 / 待签转架缺项挡下）；外观 / 风味 / 质地三维打分，均分连同依据快照与签名回写批次；依据变动自动置失效，人工复核重算；JSON 全量导出导入、单批次档案（含判定汇总）导出 | Tasting 及全部模型 |
 
 `/` 与未匹配路径均重定向到 `/milk`；页面组件全部懒加载，`router.afterEach` 统一设置 `document.title`。
 
@@ -108,23 +119,24 @@ sologsb101-1024/
 ## 五、IndexedDB 与数据存储说明
 
 - **数据库名**：`gbcheeseage`（Dexie 实例定义在 `frontend/src/utils/db.ts`）。
-- **结构版本**：`DB_VERSION = 2`。
+- **结构版本**：`DB_VERSION = 3`。
   - `version(1)`：初版六张业务表与索引。
   - `version(2).stores(...).upgrade(async (tx) => {...})`：**真实迁移**——为 `batches` 补齐 `shelfId` / `conclusion` / 时间戳；按作业日期为历史 `turnings` 回填 `seq` 执行序号；把湿度越界的 `environments` 记录重算为异常并补默认措施；把 `shelves` 的负数容量与占用数归零。
+  - `version(3).stores(...).upgrade(...)`：判定链接入——`batches` 补 `judgmentBasis` / `judgmentBasisSignature` / `judgmentInvalid` / `judgmentInvalidReason` / `judgmentAt` 与 `judgmentInvalid` 索引，`tastings` 补 `basis` / `basisSignature` 与 `basisSignature` 索引；历史已回写结论的批次统一置「失效待复核（旧版无依据快照）」，需在品评页复核重算。
 - **六张表**：
 
 | 表 | 模型 | 关键字段 | 索引 |
 | --- | --- | --- | --- |
 | `milks` | Milk 奶源 | `farm` `milkKind`(牛/羊/水牛) `collectedAt` `fatPct` `proteinPct` `note` | id, farm, milkKind, collectedAt |
-| `batches` | Batch 生产批次 | `milkId` `curdedAt` `cheeseType`(硬质/软质/蓝纹/洗皮) `targetDays` `weightKg` `state` `shelfId` `conclusion` | id, milkId, shelfId, cheeseType, state, curdedAt |
+| `batches` | Batch 生产批次 | `milkId` `curdedAt` `cheeseType`(硬质/软质/蓝纹/洗皮) `targetDays` `weightKg` `state` `shelfId` `conclusion` + 判定链五字段（依据快照 / 签名 / 失效标记 / 失效原因 / 判定时间） | id, milkId, shelfId, cheeseType, state, curdedAt, judgmentInvalid |
 | `shelves` | Shelf 窖位 | `room` `rackNo` `layerNo` `tempZone`(冷区/中温区/常温区) `capacity` `occupied` | id, room, rackNo, tempZone, occupied |
 | `turnings` | Turning 转架作业 | `batchId` `shelfId` `doneAt` `type`(转架/翻面/擦洗) `brinePct` `operator` `state` `seq` | id, batchId, shelfId, doneAt, type, state, seq |
 | `environments` | Environment 环境记录 | `batchId` `recordedAt` `tempC` `humidityPct` `anomaly` `action` | id, batchId, recordedAt, anomaly |
-| `tastings` | Tasting 品评 | `batchId` `outAt` `appearance/flavor/texture` 描述 + 三维评分 `score` `conclusion` `taster` | id, batchId, outAt, score, conclusion |
+| `tastings` | Tasting 品评 | `batchId` `outAt` `appearance/flavor/texture` 描述 + 三维评分 `score` `conclusion` `basis`/`basisSignature`（判定依据） `taster` | id, batchId, outAt, score, conclusion, basisSignature |
 
-- **首屏自动播种**：`initDatabase()` 在 `db.open()` 后执行 `if ((await db.milks.count()) === 0) { await seedDatabase() }`，播种 3 层互相引用的演示数据（奶源 3 → 生产批次 4 → 转架 4 / 环境 4 / 品评 3），使用固定 id + `bulkPut`，**幂等**（重复调用不会产生重复记录）。
+- **首屏自动播种**：`initDatabase()` 在 `db.open()` 后执行 `if ((await db.milks.count()) === 0) { await seedDatabase() }`，播种 3 层互相引用的演示数据（奶源 3 → 生产批次 4 → 转架 4 / 环境 5 / 品评 3），其中批次 A 结论「优」且依据有效、批次 B 闸门缺项（待签转架 + 未处置越界）、批次 C 依据失配「失效待复核」；使用固定 id + `bulkPut`，**幂等**（重复调用不会产生重复记录）。
 - **localStorage**：仅存元数据 —— `gbcheeseage:db-version`（本地结构版本）、`gbcheeseage:last-backup-at`（最近一次导出时间）、`gbcheeseage:ui-prefs`（当前库房、作业排序方式、曲线指标）。
-- **导出 / 导入**：`frontend/src/utils/export.ts` 提供 `exportSnapshotJson()`（全量）、`exportBatchArchiveJson(batchId)`（单批次档案）与 `parseSnapshotJson()` 校验（校验 `app` 字段、各集合数组、父子引用完整性，失败抛出原因且不写入任何数据）；`/tastings` 页支持「覆盖导入」与「追加导入（重新分配 id）」。
+- **导出 / 导入**：`frontend/src/utils/export.ts` 提供 `exportSnapshotJson()`（全量，批次判定字段与品评依据随记录带出）、`exportBatchArchiveJson(batchId)`（单批次档案，含 `judgmentSummary` 判定链汇总：闸门缺项、落库依据、实时重算结果与失效原因）与 `parseSnapshotJson()` 校验（校验 `app` 字段、各集合数组、父子引用完整性，失败抛出原因且不写入任何数据）；`/tastings` 页支持「覆盖导入」与「追加导入（重新分配 id）」，导入完成后自动按最新依据复核全部批次，闸门缺项的批次不会形成结论。
 - **隐私与无状态**：数据不上传任何服务器，容器不挂载命名卷；清理浏览器站点数据或更换浏览器会丢失档案，请定期导出备份。
 
 ---

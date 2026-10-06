@@ -24,6 +24,16 @@ export interface Batch {
   shelfId: string | null
   /** 品评均分回写的结论：优 / 合格 / 待改进（未品评时为空字符串） */
   conclusion: string
+  /** 判定依据快照（JSON 字符串）：闸门核查结果 + 均分汇总，结论成立时落库 */
+  judgmentBasis: string
+  /** 判定依据签名：与当前品评 / 环境 / 转架实时签名一致时结论才有效 */
+  judgmentBasisSignature: string
+  /** 依据后来改动后，未复核的结论是否已失效 */
+  judgmentInvalid: boolean
+  /** 失效原因（人类可读），失效时由判定链写入 */
+  judgmentInvalidReason: string
+  /** 最近一次判定（成立或复核重算）时间，ISO 字符串 */
+  judgmentAt: string
   createdAt: number
   updatedAt: number
 }

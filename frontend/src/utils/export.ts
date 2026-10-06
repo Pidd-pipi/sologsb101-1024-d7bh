@@ -7,6 +7,7 @@ import {
   type BackupPayload,
   type BatchArchive
 } from '@/utils/db'
+import { buildArchiveSummary } from '@/utils/judgement'
 
 /** 导入 / 校验结果：校验失败时 errors 非空、payload 为 null */
 export interface ParseResult {
@@ -174,6 +175,13 @@ export async function exportBatchArchiveJson(
     db.environments.where('batchId').equals(batchId).toArray(),
     db.tastings.where('batchId').equals(batchId).toArray()
   ])
+  // 判定链汇总随档案带出：闸门缺项、最新均分依据、结论状态与失效原因
+  const judgmentSummary = buildArchiveSummary({
+    batch,
+    turnings,
+    environments,
+    tastings: [...tastings].sort((a, b) => a.outAt.localeCompare(b.outAt))
+  })
   const archive: BatchArchive = {
     app: 'gbcheeseage',
     dbVersion: DB_VERSION,
@@ -185,7 +193,8 @@ export async function exportBatchArchiveJson(
     shelves: shelves.filter((shelf) => shelf.id === batch.shelfId),
     turnings,
     environments,
-    tastings
+    tastings,
+    judgmentSummary
   }
   const fileName = `gbcheeseage-batch-${batchId}-${stamp()}.json`
   downloadJson(fileName, archive)

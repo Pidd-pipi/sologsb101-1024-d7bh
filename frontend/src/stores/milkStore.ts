@@ -209,7 +209,16 @@ export const useMilkStore = defineStore('milk', () => {
 
   async function createBatch(payload: NewBatchInput): Promise<Batch> {
     const batch = await batchesTable.create(
-      { ...payload, shelfId: null, conclusion: '' },
+      {
+        ...payload,
+        shelfId: null,
+        conclusion: '',
+        judgmentBasis: '',
+        judgmentBasisSignature: '',
+        judgmentInvalid: false,
+        judgmentInvalidReason: '',
+        judgmentAt: ''
+      },
       'batch'
     )
     return batch

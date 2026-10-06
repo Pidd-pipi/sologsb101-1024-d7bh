@@ -29,6 +29,10 @@ export interface Tasting {
   score: number
   /** 结论 */
   conclusion: TastingConclusion
+  /** 提交时的判定依据快照（JSON 字符串）：闸门核查 + 均分汇总 */
+  basis: string
+  /** 提交时的依据签名 */
+  basisSignature: string
   /** 品评人 */
   taster: string
   createdAt: number
@@ -91,4 +95,10 @@ export interface BatchScore {
   avgTexture: number
   /** 最近一次出库日期 */
   lastOutAt: string
+  /** 判定链闸门是否放行（无未处置异常、无待执行转架） */
+  blocked: boolean
+  /** 当前批次结论是否有效：依据变动后未复核为 false */
+  valid: boolean
+  /** 失效 / 挡下原因（人类可读），无问题时为空串 */
+  invalidReason: string
 }

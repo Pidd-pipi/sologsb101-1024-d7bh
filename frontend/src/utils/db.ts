@@ -6,12 +6,13 @@ import type { Turning } from '@/types/turning'
 import type { Environment } from '@/types/environment'
 import type { Tasting } from '@/types/tasting'
 import { addDays, diffDays } from '@/utils/temperature'
+import { buildBasis, type JudgmentBasis } from '@/utils/judgement'
 
 /** IndexedDB 数据库名：与项目英文短名保持一致 */
 export const DB_NAME = 'gbcheeseage'
 
 /** 本地结构版本号：新增/修改表结构时必须递增，并补充 upgrade 迁移 */
-export const DB_VERSION = 2
+export const DB_VERSION = 3
 
 /** localStorage 键名（仅存少量元数据，业务数据一律在 IndexedDB） */
 export const LS_KEYS = {
@@ -61,6 +62,8 @@ export interface BatchArchive {
   turnings: Turning[]
   environments: Environment[]
   tastings: Tasting[]
+  /** 判定链汇总：最新依据、闸门缺项、结论状态与失效原因 */
+  judgmentSummary?: import('@/utils/judgement').ArchiveJudgmentSummary | null
 }
 
 export class CheeseAgeDatabase extends Dexie {
@@ -83,7 +86,7 @@ export class CheeseAgeDatabase extends Dexie {
       tastings: 'id, batchId, outAt, score, conclusion, updatedAt'
     })
     // v2：批次补 shelfId 索引与 conclusion 字段；转架表补 seq 排序索引；环境表补温区越界阈值快照
-    this.version(DB_VERSION)
+    this.version(2)
       .stores({
         milks: 'id, farm, milkKind, collectedAt, updatedAt',
         batches: 'id, milkId, shelfId, cheeseType, targetDays, state, curdedAt, updatedAt',
@@ -141,6 +144,42 @@ export class CheeseAgeDatabase extends Dexie {
           .modify((shelf) => {
             if (!Number.isFinite(shelf.capacity) || shelf.capacity < 0) shelf.capacity = 0
             if (!Number.isFinite(shelf.occupied) || shelf.occupied < 0) shelf.occupied = 0
+          })
+      })
+    // v3：出库品评接入判定链。批次补判定依据 / 失效字段索引，品评表补依据签名索引
+    this.version(DB_VERSION)
+      .stores({
+        milks: 'id, farm, milkKind, collectedAt, updatedAt',
+        batches: 'id, milkId, shelfId, cheeseType, targetDays, state, curdedAt, judgmentInvalid, updatedAt',
+        shelves: 'id, room, rackNo, tempZone, capacity, occupied, updatedAt',
+        turnings: 'id, batchId, shelfId, doneAt, type, state, seq, updatedAt',
+        environments: 'id, batchId, recordedAt, anomaly, updatedAt',
+        tastings: 'id, batchId, outAt, score, conclusion, basisSignature, updatedAt'
+      })
+      .upgrade(async (tx) => {
+        // 历史批次没有判定快照：已有结论的一律按「依据缺失、失效待复核」处理，需在品评页重算
+        await tx
+          .table<Batch>('batches')
+          .toCollection()
+          .modify((batch) => {
+            if (typeof batch.judgmentBasis !== 'string') batch.judgmentBasis = ''
+            if (typeof batch.judgmentBasisSignature !== 'string') batch.judgmentBasisSignature = ''
+            if (typeof batch.judgmentAt !== 'string') batch.judgmentAt = ''
+            if (typeof batch.judgmentInvalidReason !== 'string') batch.judgmentInvalidReason = ''
+            if (batch.conclusion) {
+              batch.judgmentInvalid = true
+              batch.judgmentInvalidReason = '升级自旧版数据，判定依据快照缺失，请复核重算'
+            } else if (typeof batch.judgmentInvalid !== 'boolean') {
+              batch.judgmentInvalid = false
+            }
+          })
+        // 历史品评记录补空依据字段（导出仍能看到该记录是在判定链接入前提交的）
+        await tx
+          .table<Tasting>('tastings')
+          .toCollection()
+          .modify((tasting) => {
+            if (typeof tasting.basis !== 'string') tasting.basis = ''
+            if (typeof tasting.basisSignature !== 'string') tasting.basisSignature = ''
           })
       })
   }
@@ -352,6 +391,11 @@ export async function seedDatabase(): Promise<void> {
       state: '已出库',
       shelfId: 'shelf_a1',
       conclusion: '优',
+      judgmentBasis: '',
+      judgmentBasisSignature: '',
+      judgmentInvalid: false,
+      judgmentInvalidReason: '',
+      judgmentAt: '2025-06-20T09:00:00.000Z',
       createdAt: now,
       updatedAt: now
     },
@@ -365,6 +409,11 @@ export async function seedDatabase(): Promise<void> {
       state: '熟成中',
       shelfId: 'shelf_b2',
       conclusion: '',
+      judgmentBasis: '',
+      judgmentBasisSignature: '',
+      judgmentInvalid: false,
+      judgmentInvalidReason: '',
+      judgmentAt: '',
       createdAt: now,
       updatedAt: now
     },
@@ -377,7 +426,13 @@ export async function seedDatabase(): Promise<void> {
       weightKg: 6.4,
       state: '熟成中',
       shelfId: 'shelf_a1',
-      conclusion: '合格',
+      // 依据改动后未复核：回写结论已清空，保留失效标记与原因，复核后可重新成立
+      conclusion: '',
+      judgmentBasis: '',
+      judgmentBasisSignature: 'stale00',
+      judgmentInvalid: true,
+      judgmentInvalidReason: '品评打分已修改（风味 7.0 → 6.5），结论未经复核已失效',
+      judgmentAt: '2025-04-20T09:00:00.000Z',
       createdAt: now,
       updatedAt: now
     },
@@ -391,6 +446,11 @@ export async function seedDatabase(): Promise<void> {
       state: '凝乳',
       shelfId: null,
       conclusion: '',
+      judgmentBasis: '',
+      judgmentBasisSignature: '',
+      judgmentInvalid: false,
+      judgmentInvalidReason: '',
+      judgmentAt: '',
       createdAt: now,
       updatedAt: now
     }
@@ -522,6 +582,18 @@ export async function seedDatabase(): Promise<void> {
       updatedAt: now
     },
     {
+      // 熟成期补录的越界记录且尚未填写处置措施 → 品评前闸门缺项
+      id: 'env_b2',
+      batchId: batchBId,
+      recordedAt: '2025-03-25T08:40',
+      tempC: 9.6,
+      humidityPct: 76,
+      anomaly: true,
+      action: '',
+      createdAt: now,
+      updatedAt: now
+    },
+    {
       id: 'env_c1',
       batchId: batchCId,
       recordedAt: '2025-03-08T14:40',
@@ -533,6 +605,18 @@ export async function seedDatabase(): Promise<void> {
       updatedAt: now
     }
   ]
+
+  // 批次 C 的依据签名故意留成旧值，演示「依据改动后失效待复核」。
+  const batchCBasis: JudgmentBasis = {
+    evaluatedAt: '2025-04-20T09:00:00.000Z',
+    tastingCount: 1,
+    avgScore: 7.0,
+    conclusion: '合格',
+    anomalyCount: 0,
+    unresolvedAnomalyCount: 0,
+    pendingTurningCount: 0,
+    signature: 'stale00'
+  }
 
   const tastings: Tasting[] = [
     {
@@ -547,6 +631,8 @@ export async function seedDatabase(): Promise<void> {
       textureScore: 8.6,
       score: 8.8,
       conclusion: '优',
+      basis: '',
+      basisSignature: '',
       taster: '林岚',
       createdAt: now,
       updatedAt: now
@@ -563,6 +649,8 @@ export async function seedDatabase(): Promise<void> {
       textureScore: 8.2,
       score: 8.2,
       conclusion: '优',
+      basis: '',
+      basisSignature: '',
       taster: '林岚',
       createdAt: now,
       updatedAt: now
@@ -579,11 +667,38 @@ export async function seedDatabase(): Promise<void> {
       textureScore: 6.9,
       score: 6.8,
       conclusion: '合格',
+      basis: JSON.stringify(batchCBasis),
+      basisSignature: 'stale00',
       taster: '赵铭',
       createdAt: now,
       updatedAt: now
     }
   ]
+
+  // 批次 A 的依据用判定链同一算法生成（转架已签完、异常均已处置），播种后即「依据有效」
+  const batchABasis = buildBasis(
+    {
+      environments: environments.filter((record) => record.batchId === batchAId),
+      turnings: turnings.filter((record) => record.batchId === batchAId),
+      tastings: tastings
+        .filter((record) => record.batchId === batchAId)
+        .sort((a, b) => a.outAt.localeCompare(b.outAt))
+    },
+    '2025-06-20T09:00:00.000Z'
+  )
+  if (!batchABasis) throw new Error('播种失败：批次 A 的判定依据未能建立（闸门缺项）')
+  const batchABasisJson = JSON.stringify(batchABasis)
+  const batchA = batches.find((batch) => batch.id === batchAId)
+  if (batchA) {
+    batchA.judgmentBasis = batchABasisJson
+    batchA.judgmentBasisSignature = batchABasis.signature
+  }
+  tastings.forEach((tasting) => {
+    if (tasting.batchId === batchAId) {
+      tasting.basis = batchABasisJson
+      tasting.basisSignature = batchABasis.signature
+    }
+  })
 
   await db.transaction(
     'rw',

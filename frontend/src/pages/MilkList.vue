@@ -494,10 +494,15 @@ function remainText(row: BatchRow): string {
             </el-tag>
           </template>
         </el-table-column>
-        <el-table-column label="结论" width="110">
+        <el-table-column label="结论" min-width="150">
           <template #default="{ row }">
+            <template v-if="row.batch.judgmentInvalid">
+              <el-tooltip :content="row.batch.judgmentInvalidReason || '判定依据已变化，结论失效待复核'" placement="top">
+                <el-tag type="danger" effect="dark" size="small">失效待复核</el-tag>
+              </el-tooltip>
+            </template>
             <GradeTag
-              v-if="conclusionOf(row.batch)"
+              v-else-if="conclusionOf(row.batch)"
               :conclusion="conclusionOf(row.batch)"
               plain
               size="small"
