@@ -7,6 +7,7 @@ import {
   type BackupPayload,
   type BatchArchive
 } from '@/utils/db'
+import { decideBatch, summarizeDecision, type BatchJudgmentSummary } from '@/utils/judgment'
 
 /** 导入 / 校验结果：校验失败时 errors 非空、payload 为 null */
 export interface ParseResult {
@@ -124,6 +125,26 @@ function stamp(): string {
   return new Date().toISOString().slice(0, 19).replace(/[:T]/g, '')
 }
 
+/**
+ * 组装判定链摘要：每个批次的核检项、依据有效性与失效原因随导出带出；
+ * 品评记录自身还带 basis 依据快照（envItems / turningItems / 复核时间等）。
+ */
+function buildJudgments(
+  batches: BackupPayload['batches'],
+  turnings: BackupPayload['turnings'],
+  environments: BackupPayload['environments'],
+  tastings: BackupPayload['tastings'],
+  batchIds?: string[]
+): BatchJudgmentSummary[] {
+  return batches
+    .filter((batch) => !batchIds || batchIds.includes(batch.id))
+    .map((batch) => {
+      const ofBatch = tastings.filter((tasting) => tasting.batchId === batch.id)
+      const decision = decideBatch(batch.id, environments, turnings, tastings)
+      return summarizeDecision(decision, ofBatch, batch.conclusion)
+    })
+}
+
 /** 导出全量档案 JSON */
 export async function exportSnapshotJson(): Promise<{ fileName: string; counts: Record<string, number> }> {
   const [milks, batches, shelves, turnings, environments, tastings] = await Promise.all([
@@ -143,7 +164,8 @@ export async function exportSnapshotJson(): Promise<{ fileName: string; counts: 
     shelves,
     turnings,
     environments,
-    tastings
+    tastings,
+    judgments: buildJudgments(batches, turnings, environments, tastings)
   }
   const fileName = `gbcheeseage-archive-v${DB_VERSION}-${stamp()}.json`
   downloadJson(fileName, payload)
@@ -185,7 +207,8 @@ export async function exportBatchArchiveJson(
     shelves: shelves.filter((shelf) => shelf.id === batch.shelfId),
     turnings,
     environments,
-    tastings
+    tastings,
+    judgments: buildJudgments([batch], turnings, environments, tastings, [batchId])
   }
   const fileName = `gbcheeseage-batch-${batchId}-${stamp()}.json`
   downloadJson(fileName, archive)
@@ -270,7 +293,9 @@ export function remapPayloadIds(payload: BackupPayload): BackupPayload {
   const tastings = payload.tastings.map((tasting) => ({
     ...tasting,
     id: createId('tast'),
-    batchId: batchIdMap.get(tasting.batchId) ?? tasting.batchId
+    batchId: batchIdMap.get(tasting.batchId) ?? tasting.batchId,
+    // 重新分配 id 后原依据快照不再适用，置空并在导入后要求重新复核
+    basis: null
   }))
 
   return { ...payload, milks, batches, shelves, turnings, environments, tastings }

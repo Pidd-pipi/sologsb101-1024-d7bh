@@ -7,6 +7,76 @@ export type TastingConclusion = '优' | '合格' | '待改进'
 /** 外观 / 风味 / 质地三个维度的评分字段 */
 export type TastingDimension = 'appearanceScore' | 'flavorScore' | 'textureScore'
 
+/** 判定链核检项的唯一键 */
+export type GateItemKey = 'envRecords' | 'envAnomalyHandled' | 'turningsSigned'
+
+/** 品评前判定链的单个核检项 */
+export interface GateCheckItem {
+  key: GateItemKey
+  /** 核检项名称 */
+  label: string
+  /** 是否通过 */
+  ok: boolean
+  /** 通过或挡下的具体说明（含数量、时间等细节） */
+  detail: string
+}
+
+/** 批次判定链核检结果：品评提交 / 复核前必须 ok */
+export interface GateCheck {
+  batchId: string
+  /** 全部核检项均通过才为 true；false 时品评必须挡下 */
+  ok: boolean
+  items: GateCheckItem[]
+}
+
+/** 依据快照中的单条环境记录摘要 */
+export interface BasisEnvItem {
+  id: string
+  recordedAt: string
+  tempC: number
+  humidityPct: number
+  anomaly: boolean
+  action: string
+}
+
+/** 依据快照中的单条转架作业摘要 */
+export interface BasisTurningItem {
+  id: string
+  doneAt: string
+  type: string
+  state: string
+  seq: number
+}
+
+/**
+ * 品评结论的依据快照：保存 / 复核时按当时的环境异常处置情况、
+ * 转架签署进度与同批次品评集合生成；依据事后被改动时，
+ * 指纹 / 品评集合签名对不上，结论即判失效、需重新复核。
+ */
+export interface TastingBasis {
+  /** 依据结构版本 */
+  version: 1
+  /** 环境 + 转架依据指纹（djb2 散列） */
+  fingerprint: string
+  /** 同批次品评集合签名（id / updatedAt / score） */
+  tastingSig: string
+  envCount: number
+  anomalyCount: number
+  /** 越界但未填处置措施的记录数 */
+  unhandledAnomalyCount: number
+  turningTotal: number
+  /** 尚未签署（待执行）的作业数 */
+  turningPending: number
+  /** 环境依据明细（全部记录，供导出留档） */
+  envItems: BasisEnvItem[]
+  /** 转架依据明细（全部作业，供导出留档） */
+  turningItems: BasisTurningItem[]
+  /** 依据中最近一条环境 / 转架记录的更新时间 ms */
+  evidenceUpdatedAt: number
+  /** 本次复核时间 ms */
+  reviewedAt: number
+}
+
 export interface Tasting {
   id: string
   /** 所属批次 id（外键 → Batch.id） */
@@ -31,6 +101,8 @@ export interface Tasting {
   conclusion: TastingConclusion
   /** 品评人 */
   taster: string
+  /** 判定链依据快照（v3 起写入；历史数据迁移补挂，导入的重映射数据置空待复核） */
+  basis: TastingBasis | null
   createdAt: number
   updatedAt: number
 }

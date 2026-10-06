@@ -6,12 +6,16 @@ import type { Turning } from '@/types/turning'
 import type { Environment } from '@/types/environment'
 import type { Tasting } from '@/types/tasting'
 import { addDays, diffDays } from '@/utils/temperature'
+import { buildBasis, collectEvidence, type BatchJudgmentSummary } from '@/utils/judgment'
 
 /** IndexedDB 数据库名：与项目英文短名保持一致 */
 export const DB_NAME = 'gbcheeseage'
 
-/** 本地结构版本号：新增/修改表结构时必须递增，并补充 upgrade 迁移 */
-export const DB_VERSION = 2
+/**
+ * 本地结构版本号：新增/修改表结构时必须递增，并补充 upgrade 迁移。
+ * v3：品评表增加判定链依据快照 basis（非索引字段），历史品评在升级时按当时依据补挂。
+ */
+export const DB_VERSION = 3
 
 /** localStorage 键名（仅存少量元数据，业务数据一律在 IndexedDB） */
 export const LS_KEYS = {
@@ -46,6 +50,8 @@ export interface BackupPayload {
   turnings: Turning[]
   environments: Environment[]
   tastings: Tasting[]
+  /** 判定链摘要（v3 起随导出带出；旧文件可缺省，校验时不强制） */
+  judgments?: BatchJudgmentSummary[]
 }
 
 /** 导出的批次熟成档案：含批次、奶源、窖位与全部子记录 */
@@ -61,6 +67,8 @@ export interface BatchArchive {
   turnings: Turning[]
   environments: Environment[]
   tastings: Tasting[]
+  /** 该批次的判定链摘要（v3 起随导出带出） */
+  judgments?: BatchJudgmentSummary[]
 }
 
 export class CheeseAgeDatabase extends Dexie {
@@ -142,6 +150,42 @@ export class CheeseAgeDatabase extends Dexie {
             if (!Number.isFinite(shelf.capacity) || shelf.capacity < 0) shelf.capacity = 0
             if (!Number.isFinite(shelf.occupied) || shelf.occupied < 0) shelf.occupied = 0
           })
+      })
+    // v3：品评表增加判定链依据快照 basis（非索引字段，stores 结构不变）；
+    // 历史品评按当时的环境异常与转架签署情况补挂依据，使其保持「已复核」状态，
+    // 此后任何依据改动才会令结论失效。
+    this.version(DB_VERSION)
+      .stores({
+        milks: 'id, farm, milkKind, collectedAt, updatedAt',
+        batches: 'id, milkId, shelfId, cheeseType, targetDays, state, curdedAt, updatedAt',
+        shelves: 'id, room, rackNo, tempZone, capacity, occupied, updatedAt',
+        turnings: 'id, batchId, shelfId, doneAt, type, state, seq, updatedAt',
+        environments: 'id, batchId, recordedAt, anomaly, updatedAt',
+        tastings: 'id, batchId, outAt, score, conclusion, updatedAt'
+      })
+      .upgrade(async (tx) => {
+        const now = Date.now()
+        const [environments, turnings, tastings] = await Promise.all([
+          tx.table<Environment>('environments').toArray(),
+          tx.table<Turning>('turnings').toArray(),
+          tx.table<Tasting>('tastings').toArray()
+        ])
+        const byBatch = new Map<string, Tasting[]>()
+        tastings.forEach((tasting) => {
+          if (tasting.basis) return
+          const bucket = byBatch.get(tasting.batchId) ?? []
+          bucket.push(tasting)
+          byBatch.set(tasting.batchId, bucket)
+        })
+        for (const [batchId, list] of byBatch) {
+          const evidence = collectEvidence(batchId, environments, turnings)
+          const ofBatch = tastings.filter((tasting) => tasting.batchId === batchId)
+          for (const tasting of list) {
+            await tx
+              .table<Tasting>('tastings')
+              .update(tasting.id, { basis: buildBasis(evidence, ofBatch, now) })
+          }
+        }
       })
   }
 }
@@ -534,7 +578,7 @@ export async function seedDatabase(): Promise<void> {
     }
   ]
 
-  const tastings: Tasting[] = [
+  const tastings: Array<Omit<Tasting, 'basis'>> = [
     {
       id: 'tast_a1',
       batchId: batchAId,
@@ -585,6 +629,21 @@ export async function seedDatabase(): Promise<void> {
     }
   ]
 
+  // 为播种的品评挂上判定链依据快照：批次 A 的越界记录已有处置、转架均已签署，
+  // 批次 C 的转架已跳过（视为签署完成），因此播种结论均处于「已复核」有效状态。
+  const seededTastings: Tasting[] = tastings.map((tasting) => ({
+    ...tasting,
+    basis: buildBasis(
+      collectEvidence(
+        tasting.batchId,
+        environments,
+        turnings
+      ),
+      tastings.filter((item) => item.batchId === tasting.batchId) as Tasting[],
+      now
+    )
+  }))
+
   await db.transaction(
     'rw',
     [db.milks, db.batches, db.shelves, db.turnings, db.environments, db.tastings],
@@ -594,7 +653,7 @@ export async function seedDatabase(): Promise<void> {
       await db.shelves.bulkPut(shelves)
       await db.turnings.bulkPut(turnings)
       await db.environments.bulkPut(environments)
-      await db.tastings.bulkPut(tastings)
+      await db.tastings.bulkPut(seededTastings)
     }
   )
 }
